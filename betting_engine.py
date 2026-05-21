@@ -42,6 +42,7 @@ class BettingEngine:
 
         self.trades: List[dict] = []
         self.balance_history: List[dict] = []
+        self.trades_db_ids: Dict[int, int] = {}  # local trade id -> Supabase row id
         self.current_position: Optional[dict] = None
 
         # Load persisted state if available
@@ -293,6 +294,7 @@ class BettingEngine:
             "trades": self.trades,
             "balance_history": self.balance_history,
             "current_position": self.current_position,
+            "trades_db_ids": self.trades_db_ids,
         }
         try:
             os.makedirs(os.path.dirname(self.state_file) or ".", exist_ok=True)
@@ -315,6 +317,7 @@ class BettingEngine:
             self.trades = state.get("trades", [])
             self.balance_history = state.get("balance_history", [])
             self.current_position = state.get("current_position")
+            self.trades_db_ids = state.get("trades_db_ids", {})
 
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(

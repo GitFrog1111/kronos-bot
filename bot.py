@@ -21,6 +21,7 @@ from binance_client import BinanceClient
 from polymarket_client import PolymarketClient
 from betting_engine import BettingEngine
 from api_server import app, set_services, update_prediction, update_signal
+from supabase_client import upsert_signal, upsert_status, insert_trade
 
 # Ensure local model module is importable
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -167,20 +168,27 @@ class KronosBot:
         try:
             prediction = self.kronos.predict_direction(candles_df)
             update_prediction(prediction)
+            await upsert_signal({
+                "signal": "up" if prediction["direction"] == "Up" else "down",
+                "confidence": prediction["confidence"],
+                "btc_price": prediction.get("current_close", 0),
+                "predicted_price": prediction.get("predicted_close", 0),
+            })
         except Exception as e:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(f"[{ts}] [Bot] Kronos prediction error: {e}")
             return
 
-        # Step C: Get current Polymarket prices
-        market = self.polymarket.current_market
-        if not market:
-            await self.polymarket.find_current_market()
-            market = self.polymarket.current_market
-            if not market:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{ts}] [Bot] No Polymarket market available")
-                return
+        # Step C: Refresh current Polymarket market (don't get stuck on expired market)
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[{ts}] [Bot] Refreshing Polymarket market ...")
+        fresh_market = await self.polymarket.find_current_market()
+        if fresh_market:
+            market = fresh_market
+        elif not market:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{ts}] [Bot] No Polymarket market available")
+            return
 
         condition_id = market.get("condition_id", "")
         clob_token_ids = market.get("clob_token_ids", [])
@@ -201,6 +209,14 @@ class KronosBot:
             market_down_price=down_price,
         )
         update_signal(bet)
+        await upsert_signal({
+            "signal": "up" if bet["direction"] == "Up" else "down",
+            "confidence": prediction["confidence"],
+            "btc_price": prediction.get("current_close", 0),
+            "predicted_price": prediction.get("predicted_close", 0),
+        })
+
+        await self._write_status(prediction, bet, market)
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         direction_symbol = "📈" if prediction["direction"] == "Up" else "📉"
@@ -238,6 +254,17 @@ class KronosBot:
                 market_odds=odds,
                 prediction=trade_prediction,
             )
+            db_id = await insert_trade({
+                "direction": bet["direction"].lower(),
+                "amount": bet["amount"],
+                "odds": odds,
+                "result": "pending",
+                "pnl": 0,
+                "market": market.get("question", market.get("slug", "BTC 5m")),
+            })
+            if db_id is not None and self.betting.current_position:
+                self.betting.trades_db_ids[self.betting.current_position["id"]] = db_id
+                self.betting._save_state()
 
             # Auto-settle after market resolution (in real bot, this would wait)
             # For now, we simulate settlement: settle the PREVIOUS trade
@@ -252,34 +279,85 @@ class KronosBot:
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"[{ts}] [Bot] --- Prediction Cycle End ---")
 
+    async def _write_status(self, prediction, bet, market):
+        try:
+            up_price = market.get("up_price", 0.5)
+            down_price = market.get("down_price", 0.5)
+            stats = self.betting.get_stats()
+            await upsert_status({
+                "online": True,
+                "market": market.get("question", market.get("slug", "")),
+                "prediction": "up" if prediction["direction"] == "Up" else "down",
+                "confidence": prediction["confidence"],
+                "odds_up": up_price,
+                "odds_down": down_price,
+                "recommended_bet": bet.get("amount") if bet.get("should_bet") else None,
+                "recommended_direction": bet["direction"].lower() if bet.get("should_bet") else None,
+                "balance": stats.get("balance", 100.0),
+            })
+        except Exception as e:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            print(f"[{ts}] [Bot] Supabase status write error: {e}")
+
     async def _settle_previous_trade(self, candles_df):
         """
-        Settle the previous trade by checking if the actual price moved
-        in the predicted direction. Uses the last two candles to determine.
+        Settle older open trades by checking if price moved in predicted direction.
+        Only settle trades that are NOT the current position.
+        Updates both local state AND Supabase.
         """
-        # Find the most recent OPEN trade (not current position)
-        open_trades = [t for t in self.betting.trades if t["status"] == "open" and t != self.betting.current_position]
+        from supabase_client import update_trade_result
+
+        # Find older open trades (not current position)
+        if not self.betting.trades:
+            return
+
+        open_trades = [t for t in self.betting.trades if t["status"] == "open"]
         if not open_trades:
             return
 
-        # We settle trades older than the current one
+        # Exclude current position if it exists
+        current_id = None
         if self.betting.current_position:
-            # Only settle if there's exactly one older open trade
-            open_trades = [t for t in open_trades if t["id"] != self.betting.current_position.get("id")]
+            current_id = self.betting.current_position.get("id")
 
-        for trade in open_trades:
-            # Check if we have enough candles to determine outcome
-            if len(candles_df) < 2:
-                continue
+        trades_to_settle = [t for t in open_trades if t["id"] != current_id]
+        if not trades_to_settle:
+            return
 
-            prev_close = candles_df["close"].iloc[-2]
-            curr_close = candles_df["close"].iloc[-1]
+        if len(candles_df) < 2:
+            return
 
-            actual_move_up = curr_close > prev_close
+        prev_close = float(candles_df["close"].iloc[-2])
+        curr_close = float(candles_df["close"].iloc[-1])
+        actual_move_up = curr_close > prev_close
+
+        for trade in trades_to_settle:
             predicted_up = trade["direction"] == "Up"
-
             won = actual_move_up == predicted_up
-            self.betting.settle_trade(won)
+
+            # Local settlement
+            payout = trade["amount"] * trade["odds"] if won else 0
+            pnl = payout - trade["amount"]
+            self.betting.balance += payout
+            trade["status"] = "settled"
+            trade["result"] = "win" if won else "loss"
+            trade["pnl"] = round(pnl, 2)
+            trade["balance_after"] = round(self.betting.balance, 2)
+            self.betting.balance_history.append({
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "balance": round(self.betting.balance, 2),
+                "trade_id": trade["id"],
+                "pnl": round(pnl, 2),
+            })
+            self.betting._save_state()
+
+            # Supabase settlement
+            db_id = self.betting.trades_db_ids.get(trade["id"])
+            if db_id:
+                await update_trade_result(db_id, trade["result"], pnl)
+                print(f"[Bot] Trade #{trade['id']} settled: {trade['result']} PnL=${pnl:+.2f} (Supabase ID: {db_id})")
+            else:
+                print(f"[Bot] Trade #{trade['id']} settled: {trade['result']} PnL=${pnl:+.2f} (no DB id)")
 
     async def shutdown(self):
         """Graceful shutdown."""

@@ -120,6 +120,36 @@ class PolymarketClient:
         except Exception as e:
             print(f"[{ts}] [Polymarket] Search error: {e}")
 
+        # Try broad Gamma API events search with Bitcoin tag
+        try:
+            async with aiohttp.ClientSession() as session:
+                broad_url = f"{GAMMA_API_BASE}/events?active=true&archived=false&closed=false&tag=Bitcoin"
+                async with session.get(broad_url) as resp:
+                    if resp.status == 200:
+                        events = await resp.json()
+                        for event in events:
+                            title = (event.get("title", "") + " " + event.get("slug", "")).lower()
+                            if "up or down" in title or "updown" in title or "bitcoin up" in title:
+                                markets = event.get("markets", [])
+                                if markets:
+                                    # Pick the market closest to now by startDate
+                                    best = markets[0]
+                                    for m in markets:
+                                        start = m.get("startDate", m.get("start_date", ""))
+                                        if start:
+                                            try:
+                                                start_dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+                                                diff = abs((now - start_dt).total_seconds())
+                                                if diff < 600:
+                                                    best = m
+                                                    break
+                                            except (ValueError, TypeError):
+                                                pass
+                                    print(f"[{ts}] [Polymarket] Found market via broad tag search: {best.get('slug', '')}")
+                                    return await self._enrich_market(best)
+        except Exception as e:
+            print(f"[{ts}] [Polymarket] Broad tag search error: {e}")
+
         # Use the fallback with generated slug for current boundary
         fallback_slug = f"btc-updown-5m-{current_boundary}"
         print(f"[{ts}] [Polymarket] Using fallback market (slug: {fallback_slug})")
@@ -142,6 +172,17 @@ class PolymarketClient:
         if not clob_token_ids:
             clob_token_ids = self._parse_token_ids_from_market(market)
 
+        # Extract outcomePrices from Gamma API response (list of strings like ["0.505", "0.495"])
+        outcome_prices = market.get("outcomePrices", [])
+        up_price = 0.50
+        down_price = 0.50
+        if outcome_prices and len(outcome_prices) >= 2:
+            try:
+                up_price = round(float(outcome_prices[0]), 4)
+                down_price = round(float(outcome_prices[1]), 4)
+            except (ValueError, TypeError):
+                pass
+
         result = {
             "slug": slug,
             "condition_id": condition_id,
@@ -149,12 +190,12 @@ class PolymarketClient:
             "question": market.get("question", market.get("title", "BTC Up/Down 5m")),
             "start_time": market.get("startTime", market.get("start_time", "")),
             "end_time": market.get("endTime", market.get("end_time", "")),
-            "up_price": 0.50,
-            "down_price": 0.50,
+            "up_price": up_price,
+            "down_price": down_price,
         }
 
-        # Try to get current prices
-        if condition_id and clob_token_ids:
+        # Only fall back to CLOB orderbook when outcomePrices is missing
+        if (up_price == 0.50 and down_price == 0.50) and condition_id and clob_token_ids:
             prices = await self.get_market_prices(condition_id, clob_token_ids)
             result.update(prices)
 
@@ -196,8 +237,8 @@ class PolymarketClient:
             bids = book.get("bids", [])
             asks = book.get("asks", [])
 
-            best_bid = float(bids[0]["price"]) if bids else 0.0
-            best_ask = float(asks[0]["price"]) if asks else 1.0
+            best_bid = self._normalize_price(bids[0]["price"]) if bids else 0.0
+            best_ask = self._normalize_price(asks[0]["price"]) if asks else 1.0
 
             if best_bid and best_ask:
                 up_mid = (best_bid + best_ask) / 2
@@ -226,19 +267,34 @@ class PolymarketClient:
 
     def _parse_token_ids_from_market(self, market: dict) -> List[str]:
         """Attempt to extract token IDs from various market data formats."""
-        # Try outcomes
+        # clobTokenIds is the canonical source — array of hex strings like
+        # ["0xabc...", "0xdef..."] or decimal strings. Use it directly.
+        clob_ids = market.get("clobTokenIds", [])
+        if clob_ids and isinstance(clob_ids, list):
+            return [str(t) for t in clob_ids]
+
+        # Fallback: try outcomes (which may be dicts in some API versions)
         outcomes = market.get("outcomes", [])
         token_ids = []
         for o in outcomes:
-            tid = o.get("tokenId", o.get("token_id", o.get("id", "")))
-            if tid:
-                token_ids.append(str(tid))
+            if isinstance(o, dict):
+                tid = o.get("tokenId", o.get("token_id", o.get("id", "")))
+                if tid:
+                    token_ids.append(str(tid))
         return token_ids
 
-    def _build_fallback_market(self) -> dict:
+    @staticmethod
+    def _normalize_price(price) -> float:
+        """Normalize CLOB price: integers (cents) -> divide by 100, decimals kept as-is."""
+        p = float(price)
+        if p > 1.0:
+            return p / 100.0
+        return p
+
+    def _build_fallback_market(self, slug: str = "btc-updown-5m") -> dict:
         """Build a fallback market with known example data."""
         return {
-            "slug": "btc-updown-5m",
+            "slug": slug,
             "condition_id": EXAMPLE_CONDITION_ID,
             "clob_token_ids": [EXAMPLE_UP_TOKEN, ""],
             "question": "Bitcoin Up or Down? (5m)",
@@ -246,6 +302,7 @@ class PolymarketClient:
             "end_time": datetime.now(timezone.utc).isoformat(),
             "up_price": 0.50,
             "down_price": 0.50,
+            "is_fallback": True,
         }
 
     # ------------------------------------------------------------------
@@ -310,8 +367,8 @@ class PolymarketClient:
         if bids or asks:
             self._orderbook = {"bids": bids, "asks": asks}
 
-            best_bid = float(bids[0]["price"]) if bids else 0.0
-            best_ask = float(asks[0]["price"]) if asks else 1.0
+            best_bid = self._normalize_price(bids[0]["price"]) if bids else 0.0
+            best_ask = self._normalize_price(asks[0]["price"]) if asks else 1.0
 
             if best_bid and best_ask:
                 mid = round((best_bid + best_ask) / 2, 4)

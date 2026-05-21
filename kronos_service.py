@@ -6,6 +6,7 @@ Provides predict_direction(ohlcv_df) for BTC price direction prediction.
 
 import sys
 import os
+import math
 from datetime import datetime, timedelta
 from typing import Tuple, Optional
 
@@ -166,10 +167,10 @@ class KronosService:
         change_pct = ((predicted_close - last_close) / last_close) * 100.0
         direction = "Up" if predicted_close > last_close else "Down"
 
-        # Confidence: map the magnitude of predicted change to confidence (0.5-1.0 range)
-        # Larger predicted moves = higher confidence, capped between 0.5 and 1.0
-        raw_conf = min(abs(change_pct) / 2.0, 0.5) + 0.5
-        confidence = round(raw_conf, 4)
+        # Confidence: exponential scaling for the model's typically small predicted moves.
+        # 0.038% -> ~0.63, 0.1% -> ~0.73, 0.3% -> ~0.89
+        x = abs(change_pct)
+        confidence = round(min(0.5 + 0.48 * (1 - math.exp(-x * 8)), 0.98), 4)
 
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(

@@ -57,11 +57,8 @@ def update_signal(signal: dict) -> None:
 # ---------------------------------------------------------------------------
 
 
-@app.get("/api/status")
-async def get_status():
-    """
-    Current state: balance, P&L, active market, Kronos prediction, position.
-    """
+def _current_status() -> dict:
+    """Build a BotStatus-shaped dict from current services."""
     stats = {}
     market = {}
     candle_count = 0
@@ -103,15 +100,50 @@ async def get_status():
             "timestamp": p.get("timestamp"),
         }
 
+    up_price = market.get("up_price", 0.5)
+    down_price = market.get("down_price", 0.5)
+    direction = "none"
+    confidence = 0
+    rec_bet = None
+    rec_dir = None
+
+    if prediction_summary:
+        direction = prediction_summary["direction"].lower() if prediction_summary["direction"] else "none"
+        confidence = prediction_summary.get("confidence", 0)
+
+    if _last_signal:
+        rec_dir = _last_signal.get("direction", "").lower()
+        if rec_dir:
+            rec_dir = rec_dir if rec_dir in ("up", "down") else None
+        rec_bet = _last_signal.get("amount")
+
     return {
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "online": True,
         "model_loaded": _kronos_service.is_loaded if _kronos_service else False,
         "candle_count": candle_count,
         "stats": stats,
         "market": market,
         "prediction": prediction_summary,
         "position": position,
+        "market_str": market.get("slug", "BTC 5m"),
+        "market_time": market.get("start_time", ""),
+        "market_close": market.get("end_time", ""),
+        "prediction_direction": direction,
+        "confidence": confidence,
+        "odds_up": up_price,
+        "odds_down": down_price,
+        "recommended_bet": rec_bet,
+        "recommended_direction": rec_dir,
     }
+
+
+@app.get("/api/status")
+async def get_status():
+    """
+    Current state: balance, P&L, active market, Kronos prediction, position.
+    """
+    return _current_status()
 
 
 @app.get("/api/trades")
@@ -186,6 +218,89 @@ async def health_check():
         "status": "ok",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "model_loaded": _kronos_service.is_loaded if _kronos_service else False,
+    }
+
+
+@app.get("/api/price_history")
+async def get_price_history():
+    """Return last 50 candles from Binance."""
+    if not _binance_client:
+        return {"candles": []}
+
+    df = _binance_client.get_recent_candles(50)
+    if df.empty:
+        return {"candles": []}
+
+    candles = []
+    for _, row in df.iterrows():
+        candles.append({
+            "timestamp": row["timestamps"].isoformat() if hasattr(row["timestamps"], "isoformat") else str(row["timestamps"]),
+            "open": float(row["open"]),
+            "high": float(row["high"]),
+            "low": float(row["low"]),
+            "close": float(row["close"]),
+            "volume": float(row["volume"]),
+        })
+    return {"candles": candles}
+
+
+@app.get("/api/noble/missions")
+async def get_noble_missions():
+    """Noble HQ mission feed — derive from bot state."""
+    stats = {}
+    if _betting_engine:
+        stats = _betting_engine.get_stats()
+
+    total_trades = stats.get("total_trades", 0)
+    progress = min(total_trades * 2, 100)
+
+    mission = {
+        "id": 1,
+        "title": "Kronos BTC 5m",
+        "priority": "high",
+        "status": "active",
+        "progress": progress,
+        "assignedTo": ["Jorge-052", "Emile-A239"],
+        "startedAt": "2026-05-21T08:00:00Z",
+    }
+    return [mission]
+
+
+@app.get("/api/noble/ops-feed")
+async def get_noble_ops_feed():
+    """Noble HQ ops feed — last 20 trades formatted as OpsEvents."""
+    events = []
+    if not _betting_engine:
+        return events
+
+    trades = _betting_engine.get_recent_trades(20)
+    for trade in trades:
+        events.append({
+            "id": trade.get("id"),
+            "timestamp": trade.get("timestamp"),
+            "member": "Kronos",
+            "memberCallSign": "BOT",
+            "action": str(trade.get("direction", "")).upper(),
+            "type": "mission",
+            "details": f"Trade #{trade.get('id')} — {str(trade.get('result', '')).upper()} PnL ${trade.get('pnl')}",
+        })
+    return events
+
+
+@app.get("/api/noble/metrics")
+async def get_noble_metrics():
+    """Noble HQ operational metrics."""
+    stats = {}
+    if _betting_engine:
+        stats = _betting_engine.get_stats()
+
+    return {
+        "active_sessions": 1,
+        "tokens_today": 0,
+        "ops_completed": stats.get("total_trades", 0),
+        "uptime": "N/A",
+        "cron_jobs": 2,
+        "bg_processes": 2,
     }
 
 

@@ -76,6 +76,7 @@ def _current_status() -> dict:
             "down_price": m.get("down_price", 0.5),
             "start_time": m.get("start_time", ""),
             "end_time": m.get("end_time", ""),
+            "is_fallback": m.get("is_fallback", True),
         }
 
     if _binance_client:
@@ -135,6 +136,7 @@ def _current_status() -> dict:
         "odds_down": down_price,
         "recommended_bet": rec_bet,
         "recommended_direction": rec_dir,
+        "is_fallback": market.get("is_fallback", True),
     }
 
 

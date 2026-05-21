@@ -185,7 +185,10 @@ class KronosBot:
         fresh_market = await self.polymarket.find_current_market()
         if fresh_market:
             market = fresh_market
-        elif not market:
+        else:
+            market = self.polymarket.current_market
+
+        if not market:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(f"[{ts}] [Bot] No Polymarket market available")
             return

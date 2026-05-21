@@ -192,6 +192,7 @@ class PolymarketClient:
             "end_time": market.get("endTime", market.get("end_time", "")),
             "up_price": up_price,
             "down_price": down_price,
+            "is_fallback": False,
         }
 
         # Only fall back to CLOB orderbook when outcomePrices is missing

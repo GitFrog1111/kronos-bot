@@ -196,9 +196,15 @@ class KronosBot:
         condition_id = market.get("condition_id", "")
         clob_token_ids = market.get("clob_token_ids", [])
 
-        prices = await self.polymarket.get_market_prices(condition_id, clob_token_ids)
-        up_price = prices.get("up_price", 0.50)
-        down_price = prices.get("down_price", 0.50)
+        # Use Gamma outcomePrices if available (already enriched by _enrich_market)
+        up_price = market.get("up_price", 0.50)
+        down_price = market.get("down_price", 0.50)
+
+        # Only fall back to CLOB if Gamma prices are missing/default
+        if (up_price == 0.50 and down_price == 0.50) and condition_id and clob_token_ids:
+            prices = await self.polymarket.get_market_prices(condition_id, clob_token_ids)
+            up_price = prices.get("up_price", 0.50)
+            down_price = prices.get("down_price", 0.50)
 
         # Update market prices in current market dict
         market["up_price"] = up_price

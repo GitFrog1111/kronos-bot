@@ -1,42 +1,45 @@
 # NOBLE HQ — AUTONOMOUS WORK STATE
-## Current Priorities (updated 2026-05-21 10:10 UTC)
+## Current Priorities (updated 2026-05-21 10:15 UTC)
 
-### ✅ P0 — Data Pipeline (kronos-bot)
-1. **Confidence scaling** — FIXED: Exponential formula `0.5 + 0.48*(1 - e^(-8x))` replaces quadratic. Maps 0.038% → ~0.63. Takes effect on bot restart.
-2. **Market odds accuracy** — FIXED: `polymarket_client.py` now extracts `outcomePrices` from Gamma API (e.g. ["0.505", "0.495"]) directly. CLOB fallback only when missing. `_parse_token_ids_from_market` fixed (outcomes are strings, not dicts). Takes effect on bot restart.
-3. **Price history endpoint** — DONE: `/api/price_history` returns 50 real Binance candles. Dashboard renders live sparkline from it.
+### ✅ P0 — Data Pipeline (kronos-bot) — ALL FIXED, AWAITS RESTART
+1. **Confidence scaling** — ✅ Exponential formula `0.5 + 0.48*(1 - e^(-8x))`. Maps 0.05% → 0.658, 0.10% → 0.764, 0.20% → 0.883.
+2. **Market odds accuracy** — ✅ Extracts `outcomePrices` from Gamma API (e.g. [0.505, 0.495]) directly. CLOB only as fallback.
+3. **Price history endpoint** — ✅ 50 real Binance 5m candles via `/api/price_history`.
+4. **Odds staleness indicator** — ✅ `is_fallback` flag flows through API → Dashboard shows ✓ LIVE or ⚠ FALLBACK badge.
 
-### ✅ P1 — Dashboard (noble-hq)
-4. **ProjectsView** — DONE: Fetches from `/api/performance` + `/api/status`.
-5. **StatusPanel** — DONE: Derives missions from `/api/status` + `/api/trades`.
-6. **OpsFeed** — DONE: Derives events from `/api/trades` + `/api/current_signal`.
-7. **MetricsBar** — DONE: Fetches from `/api/performance` + `/api/status`.
-8. **Confidence display bug** — FIXED: `KronosDashboard.tsx` already multiplies by 100.
-9. **Prediction graph** — DONE: Real sparkline from `/api/price_history` close prices.
+### ✅ P1 — Dashboard (noble-hq) — ALL RESOLVED
+5. **ProjectsView** — ✅ Live from `/api/performance` + `/api/status`.
+6. **StatusPanel** — ✅ Derives missions from `/api/status` + `/api/trades`.
+7. **OpsFeed** — ✅ Derives events from `/api/trades` + `/api/current_signal`.
+8. **MetricsBar** — ✅ Live from `/api/performance` + `/api/status`.
+9. **Confidence display** — ✅ Multiplies by 100.
+10. **Prediction graph** — ✅ Real sparkline from price history close prices.
 
-### 🔶 P1 — Remaining
-10. **Model sensitivity**: Kronos predicts tiny moves (0.01-0.15%). Even with new formula, low change_pct caps confidence. Investigate if model architecture or input features can produce larger deltas.
-11. **Odds staleness indicator**: Dashboard should show when odds are fallback 50/50 vs live Polymarket data.
-12. **Bot restart needed**: Both fixes (confidence + odds) require bot restart to take effect. Current open position (Trade #31, Down, $3) — DO NOT restart until resolved.
+### 🔴 Bot Restart Required
+Both critical fixes (odds + confidence) are in source files but need bot restart.
+**Current status**: Open position (Trade #31, Down, $3). DO NOT restart until position resolves.
 
-### 🔴 P2 — Infrastructure
-13. **GitHub push**: No credentials on container — user must push: `cd /workspace/kronos-bot && git push origin main`
-14. **Commit pending**: noble-hq (check for uncommitted changes)
-15. **Build**: noble-hq builds successfully (80 modules, 382KB JS)
+### 📊 Model Sensitivity Analysis (COMPLETE)
+- BTC 5-min volatility: median |Δ| = 0.035%, max = 0.181%
+- Kronos prediction (0.038%) is well-calibrated to actual volatility
+- 100% of 5-min moves are <0.2% — BTC is stable at this timescale
+- New exponential formula properly maps this range: 0.05% → 65.8% confidence
 
-## Active Processes
-- Bot: PID 47540, localhost:8500, healthy
-- Cloudflared: PIDs 15555, 17020, tunnel active
-- Noble HQ dev: PID 13374 (Vite), dev mode on port 5173
+### 💾 Commit Status
+- kronos-bot: 2 commits pending push (confidence+odds fix, is_fallback pipeline)
+- noble-hq: 1 commit pending push (is_fallback indicator in dashboard)
+- **User must push**: `cd /workspace/kronos-bot && git push origin main` and `cd /workspace/noble-hq && git push origin main`
+- No GitHub credentials on container
 
-## Bot State (Live)
+### 🟢 Bot State (Live, Healthy)
 - Balance: $113.00 (+16%, 30 trades, 60% win rate)
 - Current position: Down $3 (Trade #31, open since 09:40 UTC)
-- Market: btc-updown-5m-1779357900 (odds fallback 50/50 until restart)
-- Confidence: 0.5194 (will improve to ~0.63 after restart with new formula)
+- Model loaded, 500 candles, 50 in price history
+- Cloudflared tunnel active
+- All 8 API endpoints responding
 
-## NOBLE Team Assignment
-- **Emile** — ✅ Confidence + Polymarket fixes (committed)
-- **Jorge** — Dashboard ready (all live API, built)
-- **Kat** — Investigate: Kronos model sensitivity (why such tiny predictions?)
-- **Carter** — Orchestration, commit/push, state tracking
+## NOBLE Team Status
+- **Emile-A239** — ✅ Confidence/odds fixes (committed)
+- **Jorge-052** — ✅ Dashboard all-live, odds badge, built & committed
+- **Kat-B320** — ✅ Model sensitivity analysis complete
+- **Carter-A259** — ✅ Orchestration, commits, state tracking

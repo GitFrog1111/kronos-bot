@@ -307,6 +307,73 @@ async def get_noble_metrics():
 
 
 # ---------------------------------------------------------------------------
+# Playwright Browser Observability Endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/observability/screenshot")
+async def take_screenshot(url: str = "http://localhost:8500", full_page: bool = True):
+    """Capture a screenshot of the dashboard or any URL via Playwright."""
+    try:
+        from playwright_observability import NobleObservability
+        obs = await NobleObservability().start(headless=True)
+        try:
+            path = await obs.screenshot_dashboard(url)
+            return {"status": "ok", "screenshot_path": path, "url": url}
+        finally:
+            await obs.stop()
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/observability/inspect")
+async def inspect_page(url: str = "http://localhost:8500"):
+    """Inspect page structure and key metrics via Playwright."""
+    try:
+        from playwright_observability import NobleObservability
+        obs = await NobleObservability().start(headless=True)
+        try:
+            metrics = await obs.inspect_page(url)
+            return {"status": "ok", "metrics": metrics, "url": url}
+        finally:
+            await obs.stop()
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/observability/operator/{operator_id}")
+async def capture_operator(operator_id: str, url: str = "http://localhost:8500"):
+    """Capture a screenshot of a specific operator profile page."""
+    try:
+        from playwright_observability import NobleObservability
+        obs = await NobleObservability().start(headless=True)
+        try:
+            path = await obs.capture_operator_view(operator_id, url)
+            return {"status": "ok", "screenshot_path": path, "operator_id": operator_id, "url": url}
+        finally:
+            await obs.stop()
+    except Exception as e:
+        return {"status": "error", "error": str(e)}
+
+
+@app.get("/api/screenshots/latest")
+async def get_latest_screenshots():
+    """List available screenshots taken by Playwright."""
+    import glob
+    screenshot_dir = "/workspace/noble-hq/public/screenshots"
+    files = sorted(glob.glob(os.path.join(screenshot_dir, "*.png")), key=os.path.getmtime, reverse=True)
+    screenshots = []
+    for f in files[:10]:
+        screenshots.append({
+            "filename": os.path.basename(f),
+            "path": f,
+            "url_path": f"/screenshots/{os.path.basename(f)}",
+            "size": os.path.getsize(f),
+            "created": datetime.fromtimestamp(os.path.getmtime(f), tz=timezone.utc).isoformat(),
+        })
+    return {"screenshots": screenshots, "count": len(screenshots)}
+
+
+# ---------------------------------------------------------------------------
 # Static file serving for Noble HQ SPA
 # ---------------------------------------------------------------------------
 NOBLE_HQ_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "noble-hq", "dist"))
@@ -316,6 +383,11 @@ if os.path.isdir(NOBLE_HQ_DIST):
     assets_dir = os.path.join(NOBLE_HQ_DIST, "assets")
     if os.path.isdir(assets_dir):
         app.mount("/assets", StaticFiles(directory=assets_dir), name="assets")
+    
+    # Mount screenshots directory for observability
+    screenshot_dir = "/workspace/noble-hq/public/screenshots"
+    if os.path.isdir(screenshot_dir):
+        app.mount("/screenshots", StaticFiles(directory=screenshot_dir), name="screenshots")
 
     @app.get("/{path:path}")
     async def serve_spa(path: str):

@@ -24,20 +24,24 @@ class BettingEngine:
 
     Only bets if confidence > 0.55 (minimal edge threshold).
     """
-
     def __init__(
         self,
-        initial_balance: float = 100.0,
-        kelly_fraction: float = 0.35,
-        max_bet_pct: float = 0.25,
-        min_confidence: float = 0.55,
+        balance: float = 100.0,
         state_file: str = "trade_state.json",
+        kelly_fraction: float = 0.20,
+        max_bet_pct: float = 0.25,
+        min_confidence: float = 0.68,
+        max_confidence: float = 0.80,
+        calibrated_prob: float = 0.58,
     ):
-        self.initial_balance = initial_balance
-        self.balance = initial_balance
+        self.balance = balance
+        self.initial_balance = balance
+        self.state_file = state_file
         self.kelly_fraction = kelly_fraction
         self.max_bet_pct = max_bet_pct
         self.min_confidence = min_confidence
+        self.max_confidence = max_confidence
+        self.calibrated_prob = calibrated_prob
         self.state_file = state_file
 
         self.trades: List[dict] = []
@@ -68,8 +72,10 @@ class BettingEngine:
             dict with: direction, amount, kelly_fraction, edge, market_prob,
                        should_bet, reason
         """
-        # Convert confidence to predicted probability
-        predicted_prob = confidence
+        # Convert raw confidence to CALIBRATED predicted probability
+        # Based on 98-trade analysis: raw confidence is systematically overconfident
+        # Sweet spot: 0.68-0.80 raw → ~60% actual win rate → use calibrated_prob (0.58 conservative)
+        predicted_prob = self.calibrated_prob
 
         # Market-implied probability for the predicted direction
         if predicted_direction == "Up":
@@ -79,7 +85,7 @@ class BettingEngine:
 
         edge = predicted_prob - market_prob
 
-        # Check minimum confidence threshold
+        # Check minimum confidence threshold (don't bet on weak signals)
         if confidence < self.min_confidence:
             return {
                 "direction": predicted_direction,
@@ -90,6 +96,19 @@ class BettingEngine:
                 "predicted_prob": round(predicted_prob, 4),
                 "should_bet": False,
                 "reason": f"Confidence {confidence:.3f} below threshold {self.min_confidence}",
+            }
+
+        # Check maximum confidence ceiling (overconfident signals have no edge)
+        if confidence > self.max_confidence:
+            return {
+                "direction": predicted_direction,
+                "amount": 0,
+                "kelly_fraction": 0,
+                "edge": round(edge, 4),
+                "market_prob": round(market_prob, 4),
+                "predicted_prob": round(predicted_prob, 4),
+                "should_bet": False,
+                "reason": f"Confidence {confidence:.3f} above ceiling {self.max_confidence} (overconfident)",
             }
 
         # Check for edge

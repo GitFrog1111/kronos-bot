@@ -172,8 +172,19 @@ class PolymarketClient:
         if not clob_token_ids:
             clob_token_ids = self._parse_token_ids_from_market(market)
 
-        # Extract outcomePrices from Gamma API response (list of strings like ["0.505", "0.495"])
-        outcome_prices = market.get("outcomePrices", [])
+        # Extract outcomePrices from Gamma API response.
+        # Polymarket sometimes returns a JSON-encoded string: '["0.505","0.495"]'
+        raw = market.get("outcomePrices", [])
+        outcome_prices: list = []
+        if isinstance(raw, str):
+            try:
+                import json as _json
+                outcome_prices = _json.loads(raw)
+            except Exception:
+                outcome_prices = []
+        elif isinstance(raw, list):
+            outcome_prices = raw
+
         up_price = 0.50
         down_price = 0.50
         if outcome_prices and len(outcome_prices) >= 2:

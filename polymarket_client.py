@@ -318,52 +318,68 @@ class PolymarketClient:
         }
 
     # ------------------------------------------------------------------
-    # WebSocket Methods
+    # WebSocket Methods (legacy — replaced by REST poller below)
     # ------------------------------------------------------------------
 
     def set_price_callback(self, callback: Callable) -> None:
         """Register a callback invoked with updated price data."""
         self._price_callback = callback
 
-    async def start_orderbook_stream(self, token_id: Optional[str] = None) -> None:
+    async def start_price_poller(self, token_id: Optional[str] = None, interval: float = 2.0) -> None:
         """
-        Connect to CLOB WebSocket and subscribe to orderbook for the given token.
+        Aggressive REST polling for real-time orderbook prices.
+        Polls CLOB /book endpoint every `interval` seconds.
+        Replaces broken WebSocket — same real-time effect, more reliable.
         """
         tid = token_id or EXAMPLE_UP_TOKEN
-        self._ws_running = True
-
+        self._ws_running = True  # reuse flag
+        
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[{ts}] [Polymarket] Connecting WebSocket: {CLOB_WS_URL}")
-
+        print(f"[{ts}] [Polymarket] Starting REST price poller (every {interval}s) for token={tid[:16]}...")
+        
         while self._ws_running:
             try:
-                async with websockets.connect(CLOB_WS_URL, ping_interval=30, ping_timeout=10) as ws:
-                    self._ws = ws
-
-                    # Subscribe to book channel
-                    sub_msg = {
-                        "type": "subscribe",
-                        "channel": "book",
-                        "asset_id": tid,
-                    }
-                    await ws.send(json.dumps(sub_msg))
-
-                    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    print(f"[{ts}] [Polymarket] Subscribed to orderbook for token={tid[:16]}...")
-
-                    async for msg in ws:
-                        if not self._ws_running:
-                            break
-                        await self._handle_book_message(msg)
-
-            except (websockets.ConnectionClosed, OSError) as e:
-                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{ts}] [Polymarket] WS disconnected: {e}. Reconnecting in 5s ...")
-                await asyncio.sleep(5)
+                book_url = f"{CLOB_API_BASE}/book?token_id={tid}"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(book_url) as resp:
+                        if resp.status == 200:
+                            book = await resp.json()
+                            bids = book.get("bids", [])
+                            asks = book.get("asks", [])
+                            
+                            if bids or asks:
+                                best_bid = self._normalize_price(bids[0]["price"]) if bids else 0.0
+                                best_ask = self._normalize_price(asks[0]["price"]) if asks else 1.0
+                                
+                                if best_bid and best_ask:
+                                    mid = round((best_bid + best_ask) / 2, 4)
+                                elif best_bid:
+                                    mid = best_bid
+                                else:
+                                    mid = best_ask
+                                
+                                self._up_midpoint = mid
+                                self._orderbook = {"bids": bids, "asks": asks}
+                                
+                                if self._price_callback:
+                                    try:
+                                        self._price_callback({
+                                            "up_mid": mid,
+                                            "down_mid": round(1.0 - mid, 4),
+                                            "best_bid": round(best_bid, 4),
+                                            "best_ask": round(best_ask, 4),
+                                        })
+                                    except Exception:
+                                        pass
             except Exception as e:
                 ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                print(f"[{ts}] [Polymarket] WS error: {e}. Reconnecting in 10s ...")
-                await asyncio.sleep(10)
+                print(f"[{ts}] [Polymarket] Price poller error: {e}")
+            
+            await asyncio.sleep(interval)
+
+    async def start_orderbook_stream(self, token_id: Optional[str] = None) -> None:
+        """Legacy WebSocket — now delegates to REST poller."""
+        await self.start_price_poller(token_id)
 
     async def _handle_book_message(self, msg: str) -> None:
         """Parse an orderbook update message."""

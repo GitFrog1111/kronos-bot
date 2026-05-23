@@ -296,6 +296,8 @@ class KronosBot:
             await upsert_status({
                 "online": True,
                 "market": market.get("question", market.get("slug", "")),
+                "market_time": market.get("start_time", ""),
+                "market_close": market.get("end_time", ""),
                 "prediction": "up" if prediction["direction"] == "Up" else "down",
                 "confidence": prediction["confidence"],
                 "odds_up": up_price,

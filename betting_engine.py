@@ -77,13 +77,11 @@ class BettingEngine:
         # Sweet spot: 0.68-0.80 raw → ~60% actual win rate → use calibrated_prob (0.58 conservative)
         predicted_prob = self.calibrated_prob
 
-        # Market-implied probability for the predicted direction
+        # Market implied probability for the predicted direction
         if predicted_direction == "Up":
             market_prob = market_up_price
         else:
             market_prob = market_down_price
-
-        edge = predicted_prob - market_prob
 
         # Check minimum confidence threshold (don't bet on weak signals)
         if confidence < self.min_confidence:
@@ -91,25 +89,22 @@ class BettingEngine:
                 "direction": predicted_direction,
                 "amount": 0,
                 "kelly_fraction": 0,
-                "edge": round(edge, 4),
+                "edge": 0,
                 "market_prob": round(market_prob, 4),
-                "predicted_prob": round(predicted_prob, 4),
+                "predicted_prob": 0.5,
                 "should_bet": False,
                 "reason": f"Confidence {confidence:.3f} below threshold {self.min_confidence}",
             }
 
-        # Check maximum confidence ceiling (overconfident signals have no edge)
-        if confidence > self.max_confidence:
-            return {
-                "direction": predicted_direction,
-                "amount": 0,
-                "kelly_fraction": 0,
-                "edge": round(edge, 4),
-                "market_prob": round(market_prob, 4),
-                "predicted_prob": round(predicted_prob, 4),
-                "should_bet": False,
-                "reason": f"Confidence {confidence:.3f} above ceiling {self.max_confidence} (overconfident)",
-            }
+        # Convert confidence into a calibrated probability band so Kelly
+        # sizing can scale with conviction instead of using a flat probability.
+        confidence = max(0.0, min(1.0, confidence))
+        confidence_span = max(0.0, confidence - self.min_confidence)
+        confidence_scale = confidence_span / max(1e-9, (1.0 - self.min_confidence))
+        predicted_prob = 0.5 + (self.calibrated_prob - 0.5) * confidence_scale
+        predicted_prob = max(0.5, min(0.99, predicted_prob))
+
+        edge = predicted_prob - market_prob
 
         # Check for edge
         if edge <= 0:

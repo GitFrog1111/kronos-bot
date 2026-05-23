@@ -246,6 +246,19 @@ async def get_price_history():
     return {"candles": candles}
 
 
+@app.get("/api/balance_history")
+async def get_balance_history():
+    """Return balance/equity history for PnL chart."""
+    if not _betting_engine:
+        return {"history": []}
+    
+    history = _betting_engine.balance_history
+    if not history:
+        return {"history": []}
+    
+    return {"history": history[-100:]}  # Last 100 points
+
+
 @app.get("/api/noble/missions")
 async def get_noble_missions():
     """Noble HQ mission feed — derive from bot state."""

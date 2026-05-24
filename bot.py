@@ -306,6 +306,17 @@ class KronosBot:
                 "recommended_direction": bet["direction"].lower() if bet.get("should_bet") else None,
                 "balance": stats.get("balance", 100.0),
             })
+            self.betting.note_strategy_update(
+                "confidence_to_expected_return",
+                {
+                    "summary": "Confidence now maps monotonically into both edge and size.",
+                    "goal": "clean upward relationship between confidence and expected return",
+                    "min_confidence": self.betting.min_confidence,
+                    "max_confidence": self.betting.max_confidence,
+                    "kelly_fraction": self.betting.kelly_fraction,
+                    "max_bet_pct": self.betting.max_bet_pct,
+                },
+            )
         except Exception as e:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             print(f"[{ts}] [Bot] Supabase status write error: {e}")

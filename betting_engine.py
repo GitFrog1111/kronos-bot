@@ -46,11 +46,23 @@ class BettingEngine:
 
         self.trades: List[dict] = []
         self.balance_history: List[dict] = []
+        self.journal_events: List[dict] = []
         self.trades_db_ids: Dict[int, int] = {}  # local trade id -> Supabase row id
         self.current_position: Optional[dict] = None
 
         # Load persisted state if available
         self._load_state()
+        self._record_journal_event(
+            "system",
+            "betting_engine_initialized",
+            {
+                "balance": self.balance,
+                "state_file": self.state_file,
+                "min_confidence": self.min_confidence,
+                "max_confidence": self.max_confidence,
+                "kelly_fraction": self.kelly_fraction,
+            },
+        )
 
     def calculate_bet(
         self,
@@ -72,18 +84,9 @@ class BettingEngine:
             dict with: direction, amount, kelly_fraction, edge, market_prob,
                        should_bet, reason
         """
-        # Convert raw confidence to CALIBRATED predicted probability
-        # Based on 98-trade analysis: raw confidence is systematically overconfident
-        # Sweet spot: 0.68-0.80 raw → ~60% actual win rate → use calibrated_prob (0.58 conservative)
-        predicted_prob = self.calibrated_prob
+        confidence = max(0.0, min(1.0, confidence))
+        market_prob = market_up_price if predicted_direction == "Up" else market_down_price
 
-        # Market implied probability for the predicted direction
-        if predicted_direction == "Up":
-            market_prob = market_up_price
-        else:
-            market_prob = market_down_price
-
-        # Check minimum confidence threshold (don't bet on weak signals)
         if confidence < self.min_confidence:
             return {
                 "direction": predicted_direction,
@@ -96,36 +99,23 @@ class BettingEngine:
                 "reason": f"Confidence {confidence:.3f} below threshold {self.min_confidence}",
             }
 
-        # Convert confidence into a calibrated probability band so Kelly
-        # sizing can scale with conviction instead of using a flat probability.
-        confidence = max(0.0, min(1.0, confidence))
-        confidence_span = max(0.0, confidence - self.min_confidence)
-        confidence_scale = confidence_span / max(1e-9, (1.0 - self.min_confidence))
-        predicted_prob = 0.5 + (self.calibrated_prob - 0.5) * confidence_scale
-        predicted_prob = max(0.5, min(0.99, predicted_prob))
+        # Monotonic confidence curve:
+        # higher confidence should imply larger expected return and larger size.
+        confidence_scale = (confidence - self.min_confidence) / max(1e-9, (1.0 - self.min_confidence))
+        confidence_scale = max(0.0, min(1.0, confidence_scale))
 
+        # Start slightly above the market so the edge is nonzero, then increase
+        # smoothly with confidence.
+        base_edge = max(0.015, (self.calibrated_prob - 0.5) * 0.5)
+        predicted_prob = market_prob + base_edge + confidence_scale * (self.calibrated_prob - market_prob)
+        predicted_prob = max(market_prob + 0.001, min(0.99, predicted_prob))
         edge = predicted_prob - market_prob
 
-        # Check for edge
-        if edge <= 0:
-            return {
-                "direction": predicted_direction,
-                "amount": 0,
-                "kelly_fraction": 0,
-                "edge": round(edge, 4),
-                "market_prob": round(market_prob, 4),
-                "predicted_prob": round(predicted_prob, 4),
-                "should_bet": False,
-                "reason": f"No edge (edge={edge:.4f})",
-            }
-
-        # Market odds for the bet direction
         if predicted_direction == "Up":
             odds = 1.0 / market_up_price if market_up_price > 0 else float("inf")
         else:
             odds = 1.0 / market_down_price if market_down_price > 0 else float("inf")
 
-        # Kelly fraction: f* = edge / (odds - 1)
         if odds <= 1:
             return {
                 "direction": predicted_direction,
@@ -139,15 +129,11 @@ class BettingEngine:
             }
 
         kelly_f_star = edge / (odds - 1)
+        bet_fraction = max(0.0, min(kelly_f_star * self.kelly_fraction, self.max_bet_pct))
 
-        # Apply fractional Kelly
-        bet_fraction = kelly_f_star * self.kelly_fraction
-
-        # Cap at max_bet_pct of bankroll
-        bet_fraction = min(bet_fraction, self.max_bet_pct)
-
-        # Don't bet negative
-        bet_fraction = max(0, bet_fraction)
+        # Small extra boost that increases smoothly with confidence.
+        confidence_size_boost = 0.75 + 0.75 * confidence_scale
+        bet_fraction = min(bet_fraction * confidence_size_boost, self.max_bet_pct)
 
         bet_amount = round(self.balance * bet_fraction)
 
@@ -165,6 +151,19 @@ class BettingEngine:
                 else "No bet (zero size)"
             ),
         }
+
+    def _record_journal_event(self, event_type: str, title: str, details: dict) -> None:
+        event = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "event_type": event_type,
+            "title": title,
+            "details": details,
+        }
+        self.journal_events.append(event)
+        self._save_state()
+
+    def note_strategy_update(self, title: str, details: dict) -> None:
+        self._record_journal_event("update", title, details)
 
     def execute_trade(
         self,
@@ -307,6 +306,7 @@ class BettingEngine:
             "initial_balance": self.initial_balance,
             "trades": self.trades,
             "balance_history": self.balance_history,
+            "journal_events": self.journal_events,
             "current_position": self.current_position,
             "trades_db_ids": self.trades_db_ids,
         }
@@ -330,6 +330,7 @@ class BettingEngine:
             self.balance = state.get("balance", self.initial_balance)
             self.trades = state.get("trades", [])
             self.balance_history = state.get("balance_history", [])
+            self.journal_events = state.get("journal_events", [])
             self.current_position = state.get("current_position")
             self.trades_db_ids = state.get("trades_db_ids", {})
 

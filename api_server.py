@@ -6,11 +6,12 @@ and current signal endpoints. CORS enabled for localhost:5173 and all origins.
 
 from datetime import datetime, timezone
 from typing import Optional
+from html import escape
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 import os
 
 app = FastAPI(title="Kronos BTC Bot", version="1.0.0")
@@ -246,17 +247,159 @@ async def get_price_history():
     return {"candles": candles}
 
 
+def _downsample_history(history: list[dict], max_points: int = 240) -> list[dict]:
+    """Keep the full time span while trimming extremely dense series."""
+    if len(history) <= max_points:
+        return history
+
+    if max_points < 2:
+        return [history[-1]]
+
+    step = (len(history) - 1) / (max_points - 1)
+    sampled = []
+    seen = set()
+    for i in range(max_points):
+        idx = round(i * step)
+        if idx not in seen:
+            sampled.append(history[idx])
+            seen.add(idx)
+    if sampled[-1] is not history[-1]:
+        sampled[-1] = history[-1]
+    return sampled
+
+
+def _build_pnl_svg(history: list[dict]) -> str:
+    """Render a compact SVG PnL graph from full balance history."""
+    if not history:
+        return """<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='320' viewBox='0 0 1200 320'>
+  <rect width='100%' height='100%' fill='#07111f'/>
+  <text x='60' y='160' fill='#93a4c3' font-family='Inter,system-ui,sans-serif' font-size='18'>No Kronos balance history yet.</text>
+</svg>"""
+
+    series = _downsample_history(history)
+    balances = [float(row.get("balance", 0) or 0) for row in series]
+    if not balances:
+        balances = [0.0]
+
+    width, height = 1200, 340
+    pad_l, pad_r, pad_t, pad_b = 72, 36, 54, 70
+    plot_w = width - pad_l - pad_r
+    plot_h = height - pad_t - pad_b
+
+    min_v = min(balances)
+    max_v = max(balances)
+    if max_v == min_v:
+        max_v += 1.0
+    margin = max((max_v - min_v) * 0.08, 1.0)
+    min_v -= margin
+    max_v += margin
+
+    def x_at(i: int) -> float:
+        return pad_l + (plot_w * i / max(1, len(balances) - 1))
+
+    def y_at(v: float) -> float:
+        return pad_t + ((max_v - v) / (max_v - min_v)) * plot_h
+
+    pts = [(x_at(i), y_at(v)) for i, v in enumerate(balances)]
+    path = [f"M{pts[0][0]:.2f},{pts[0][1]:.2f}"]
+    for x, y in pts[1:]:
+        path.append(f"L{x:.2f},{y:.2f}")
+    line_path = " ".join(path)
+    area_path = f"M{pts[0][0]:.2f},{height-pad_b:.2f} " + " ".join(path) + f" L{pts[-1][0]:.2f},{height-pad_b:.2f} Z"
+
+    first = balances[0]
+    last = balances[-1]
+    total_change = last - first
+    total_change_pct = (total_change / first * 100.0) if first else 0.0
+    latest_ts = str(series[-1].get("timestamp", ""))[:19].replace("T", " ")
+    start_ts = str(series[0].get("timestamp", ""))[:19].replace("T", " ")
+
+    grid_lines = []
+    for frac in (0, 0.25, 0.5, 0.75, 1.0):
+        y = pad_t + frac * plot_h
+        val = max_v - frac * (max_v - min_v)
+        grid_lines.append((y, val))
+
+    def fmt_currency(v: float) -> str:
+        sign = "+" if v >= 0 else "-"
+        return f"{sign}${abs(v):,.2f}"
+
+    svg = [
+        f"<svg xmlns='http://www.w3.org/2000/svg' width='{width}' height='{height}' viewBox='0 0 {width} {height}' role='img' aria-label='Kronos full-history PnL graph'>",
+        "<defs>",
+        "<linearGradient id='bg' x1='0' y1='0' x2='0' y2='1'>",
+        "<stop offset='0%' stop-color='#0a1220'/>",
+        "<stop offset='100%' stop-color='#050a12'/>",
+        "</linearGradient>",
+        "<linearGradient id='area' x1='0' y1='0' x2='0' y2='1'>",
+        "<stop offset='0%' stop-color='#38bdf8' stop-opacity='0.34'/>",
+        "<stop offset='100%' stop-color='#38bdf8' stop-opacity='0.04'/>",
+        "</linearGradient>",
+        "<filter id='glow' x='-15%' y='-15%' width='130%' height='130%'>",
+        "<feGaussianBlur stdDeviation='2.8' result='blur'/>",
+        "<feMerge><feMergeNode in='blur'/><feMergeNode in='SourceGraphic'/></feMerge>",
+        "</filter>",
+        "<style>",
+        ".title{font:700 26px Inter,system-ui,sans-serif;fill:#e5eefc}",
+        ".sub{font:500 13px Inter,system-ui,sans-serif;fill:#8ea0bf}",
+        ".tick{font:12px Inter,system-ui,sans-serif;fill:#8aa0c4}",
+        ".grid{stroke:#22314a;stroke-width:1;shape-rendering:crispEdges}",
+        ".stat{font:600 13px Inter,system-ui,sans-serif;fill:#bfd0ea}",
+        "</style>",
+        "</defs>",
+        "<rect width='100%' height='100%' fill='url(#bg)' rx='20'/>",
+        "<text x='72' y='34' class='title'>Kronos full-history PnL</text>",
+        f"<text x='72' y='56' class='sub'>{escape(start_ts)} → {escape(latest_ts)} · {len(series)} settled points</text>",
+    ]
+
+    for y, val in grid_lines:
+        svg.append(f"<line x1='{pad_l}' y1='{y:.1f}' x2='{width-pad_r}' y2='{y:.1f}' class='grid' opacity='0.7'/>")
+        svg.append(f"<text x='{pad_l-10}' y='{y+4:.1f}' text-anchor='end' class='tick'>${val:,.2f}</text>")
+
+    x_marks = [0, len(series) // 2, len(series) - 1]
+    for idx in x_marks:
+        x, _ = pts[idx]
+        ts = str(series[idx].get('timestamp', ''))[:16].replace('T', ' ')
+        svg.append(f"<line x1='{x:.1f}' y1='{pad_t}' x2='{x:.1f}' y2='{height-pad_b}' class='grid' opacity='0.25' stroke-dasharray='4 6'/>")
+        svg.append(f"<text x='{x:.1f}' y='{height-26}' text-anchor='middle' class='tick'>{escape(ts)}</text>")
+
+    svg.extend([
+        f"<path d='{area_path}' fill='url(#area)'/>",
+        f"<path d='{line_path}' fill='none' stroke='#38bdf8' stroke-width='3.5' stroke-linecap='round' stroke-linejoin='round' filter='url(#glow)'/>",
+        f"<circle cx='{pts[0][0]:.2f}' cy='{pts[0][1]:.2f}' r='5' fill='#93c5fd' stroke='#050a12' stroke-width='2'/>",
+        f"<circle cx='{pts[-1][0]:.2f}' cy='{pts[-1][1]:.2f}' r='5' fill='#93c5fd' stroke='#050a12' stroke-width='2'/>",
+        f"<text x='{72}' y='{height-38}' class='stat'>Start {fmt_currency(first)}</text>",
+        f"<text x='{292}' y='{height-38}' class='stat'>Latest {fmt_currency(last)}</text>",
+        f"<text x='{540}' y='{height-38}' class='stat'>Total {fmt_currency(total_change)} ({total_change_pct:+.2f}%)</text>",
+    ])
+
+    svg.append("</svg>")
+    return "".join(svg)
+
+
 @app.get("/api/balance_history")
 async def get_balance_history():
-    """Return balance/equity history for PnL chart."""
+    """Return full balance/equity history for PnL chart."""
     if not _betting_engine:
         return {"history": []}
-    
+
     history = _betting_engine.balance_history
     if not history:
         return {"history": []}
-    
-    return {"history": history[-100:]}  # Last 100 points
+
+    return {"history": history}
+
+
+@app.get("/api/pnl_svg")
+async def get_pnl_svg():
+    """Render the full-history Kronos PnL graph as SVG."""
+    if not _betting_engine:
+        return Response(content=_build_pnl_svg([]), media_type="image/svg+xml")
+
+    return Response(
+        content=_build_pnl_svg(_betting_engine.balance_history),
+        media_type="image/svg+xml",
+    )
 
 
 @app.get("/api/noble/missions")
